@@ -1,0 +1,673 @@
+version: '3.7'
+
+# Define the common environment between all brokers.
+# See: https://docs.docker.com/compose/compose-file/#extension-fields
+x-broker-environment:
+  &broker-environment
+  # Zookeeper connection
+  KAFKA_ZOOKEEPER_CONNECT: zoo1:2181,zoo2:2182,zoo3:2183
+
+  # Please see ./Runbooks/Security.md for details about how cluster security is
+  # designed and managed.
+
+  # Protocol selections
+  KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL_SSL:SSL,SSL:SSL
+  KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL_SSL
+
+  # Kafka SSL Configuration (Note: literal $ is escaped as $$ for docker compose)
+  KAFKA_SSL_CLIENT_AUTH: required
+  KAFKA_SSL_PRINCIPAL_MAPPING_RULES: "RULE:^(?=.*\\\\bCN=(.+?)(,|$$))(?=.*\\\\bOU=Kafka Security - (?i:${ENVIRONMENT_NAME})(,|$$)).*$$/$$1/L"
+  KAFKA_SSL_ENDPOINT_IDENTIFICATION_ALGORITHM: ""
+
+  # Truststore
+  KAFKA_SSL_TRUSTSTORE_FILENAME: kafka.server.truststore.jks
+  KAFKA_SSL_TRUSTSTORE_CREDENTIALS: kafka.server.truststore.credentials
+  FILE_TRUSTSTORECRED_LOCATION: /etc/kafka/secrets/kafka.server.truststore.credentials
+  FILE_TRUSTSTORECRED_CONTENTS: ${TRUSTSTORE_PASSWORD:?}
+
+  # Keystore
+  KAFKA_SSL_KEYSTORE_FILENAME: kafka.server.keystore.jks
+  KAFKA_SSL_KEYSTORE_CREDENTIALS: kafka.server.keystore.credentials
+  KAFKA_SSL_KEY_CREDENTIALS: kafka.server.keystore.credentials
+  
+  # Authorization
+  KAFKA_SUPER_USERS: User:broker1;User:broker2;User:broker3
+  KAFKA_AUTHORIZER_CLASS_NAME: kafka.security.authorizer.AclAuthorizer
+  KAFKA_ALLOW_EVERYONE_IF_NO_ACL_FOUND: "false"
+
+  # Topic, partition default behavior
+  KAFKA_DELETE_TOPIC_ENABLE: "true"
+  KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+  KAFKA_NUM_PARTITIONS: 9
+  KAFKA_DEFAULT_REPLICATION_FACTOR: 2
+  KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 2
+
+  # Cluster
+  # To enable auth debug logging, add `,kafka.authorizer.logger=DEBUG`
+  KAFKA_LOG4J_LOGGERS: kafka.controller=INFO,kafka.producer.async.DefaultEventHandler=INFO,state.change.logger=INFO
+  KAFKA_JMX_PORT: 39999
+  DT_CUSTOM_PROP: Environment=${ENVIRONMENT_NAME:?} Deployment=KafkaPlatform Tier=Backend Application=KafkaBroker
+  KAFKA_CONFLUENT_SUPPORT_METRICS_ENABLE: "false"
+
+services:
+  zoo1:
+    image: bkcimages.azurecr.io/appint-zookeeper:${TAG_ZOOKEEPER:?image tag for zookeeper must be provided}
+    deploy:
+      placement:
+        constraints:
+          - node.labels.zdata3 == 1
+    networks:
+      - core
+    volumes:
+      - zoo1_data:/var/lib/zookeeper/data
+      - zoo1_logs:/var/lib/zookeeper/log
+    environment:
+      ZOOKEEPER_SERVER_ID: 1
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+      ZOOKEEPER_INIT_LIMIT: 100
+      ZOOKEEPER_SYNC_LIMIT: 2
+      ZOOKEEPER_CNXTIMEOUT: 30
+      KAFKA_OPTS: "-Dzookeeper.4lw.commands.whitelist=*"
+      ZOOKEEPER_SERVERS: 0.0.0.0:2888:3888;zoo2:2888:3888;zoo3:2888:3888
+      KAFKA_JMX_PORT: 39999
+      DT_CUSTOM_PROP: Environment=${ENVIRONMENT_NAME:?} Deployment=KafkaPlatform Tier=Backend Application=Zookeeper
+
+  zoo2:
+    image: bkcimages.azurecr.io/appint-zookeeper:${TAG_ZOOKEEPER:?image tag for zookeeper must be provided}
+    deploy:
+      placement:
+        constraints:
+          - node.labels.zdata3 == 2
+    networks:
+      - core
+    volumes:
+      - zoo2_data:/var/lib/zookeeper/data
+      - zoo2_logs:/var/lib/zookeeper/log
+    entrypoint: ["/wait-for-it.sh", "zoo1:2181", "--timeout=600", "--", "/etc/confluent/docker/run"]
+    environment:
+      ZOOKEEPER_SERVER_ID: 2
+      ZOOKEEPER_CLIENT_PORT: 2182
+      ZOOKEEPER_TICK_TIME: 2000
+      ZOOKEEPER_INIT_LIMIT: 100
+      ZOOKEEPER_SYNC_LIMIT: 2
+      ZOOKEEPER_CNXTIMEOUT: 30
+      KAFKA_OPTS: "-Dzookeeper.4lw.commands.whitelist=*"
+      ZOOKEEPER_SERVERS: zoo1:2888:3888;0.0.0.0:2888:3888;zoo3:2888:3888
+      KAFKA_JMX_PORT: 39999
+      DT_CUSTOM_PROP: Environment=${ENVIRONMENT_NAME:?} Deployment=KafkaPlatform Tier=Backend Application=Zookeeper
+
+  zoo3:
+    image: bkcimages.azurecr.io/appint-zookeeper:${TAG_ZOOKEEPER:?image tag for zookeeper must be provided}
+    deploy:
+      placement:
+        constraints:
+          - node.labels.zdata3 == 3
+    networks:
+      - core
+    volumes:
+      - zoo3_data:/var/lib/zookeeper/data
+      - zoo3_logs:/var/lib/zookeeper/log
+    entrypoint: ["/wait-for-it.sh", "zoo2:2182", "--timeout=600", "--", "/etc/confluent/docker/run"]
+    environment:
+      ZOOKEEPER_SERVER_ID: 3
+      ZOOKEEPER_CLIENT_PORT: 2183
+      ZOOKEEPER_TICK_TIME: 2000
+      ZOOKEEPER_INIT_LIMIT: 100
+      ZOOKEEPER_SYNC_LIMIT: 2
+      ZOOKEEPER_CNXTIMEOUT: 30
+      KAFKA_OPTS: "-Dzookeeper.4lw.commands.whitelist=*"
+      ZOOKEEPER_SERVERS: zoo1:2888:3888;zoo2:2888:3888;0.0.0.0:2888:3888
+      KAFKA_JMX_PORT: 39999
+      DT_CUSTOM_PROP: Environment=${ENVIRONMENT_NAME:?} Deployment=KafkaPlatform Tier=Backend Application=Zookeeper
+
+  kafka1:
+    image: bkcimages.azurecr.io/appint-broker:${TAG_BROKER:?image tag for broker must be provided}
+    deploy:
+      placement:
+        constraints:
+          - node.labels.kdata3 == 1
+    networks:
+      - core
+    ports:
+      - "9092:9092"
+    volumes:
+      - kafka1_data:/var/lib/kafka/data
+    secrets:
+      - source: broker-truststore
+        target: /etc/kafka/secrets/kafka.server.truststore.jks
+      - source: broker1-keystore
+        target: /etc/kafka/secrets/kafka.server.keystore.jks
+    environment:
+      << : *broker-environment
+      KAFKA_BROKER_ID: 1
+      KAFKA_LISTENERS: INTERNAL_SSL://0.0.0.0:19092,SSL://0.0.0.0:9092
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL_SSL://kafka1:19092,SSL://{{.Node.Hostname}}:9092
+
+      FILE_KEYSTORE_CREDENTIALS_LOCATION: /etc/kafka/secrets/kafka.server.keystore.credentials
+      FILE_KEYSTORE_CREDENTIALS_CONTENTS: ${BROKER1_KEYSTORE_PASSWORD:?}
+
+  kafka2:
+    image: bkcimages.azurecr.io/appint-broker:${TAG_BROKER:?image tag for broker must be provided}
+    deploy:
+      placement:
+        constraints:
+          - node.labels.kdata3 == 2
+    networks:
+      - core
+    ports:
+      - "9093:9093"
+    volumes:
+      - kafka2_data:/var/lib/kafka/data
+    secrets:
+      - source: broker-truststore
+        target: /etc/kafka/secrets/kafka.server.truststore.jks
+      - source: broker2-keystore
+        target: /etc/kafka/secrets/kafka.server.keystore.jks
+    environment:
+      << : *broker-environment
+      KAFKA_BROKER_ID: 2
+      KAFKA_LISTENERS: INTERNAL_SSL://0.0.0.0:19093,SSL://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL_SSL://kafka2:19093,SSL://{{.Node.Hostname}}:9093
+      
+      FILE_KEYSTORE_CREDENTIALS_LOCATION: /etc/kafka/secrets/kafka.server.keystore.credentials
+      FILE_KEYSTORE_CREDENTIALS_CONTENTS: ${BROKER2_KEYSTORE_PASSWORD:?}
+
+  kafka3:
+    image: bkcimages.azurecr.io/appint-broker:${TAG_BROKER:?image tag for broker must be provided}
+    deploy:
+      placement:
+        constraints:
+          - node.labels.kdata3 == 3
+    networks:
+      - core
+    ports:
+      - "9094:9094"
+    volumes:
+      - kafka3_data:/var/lib/kafka/data
+    secrets:
+      - source: broker-truststore
+        target: /etc/kafka/secrets/kafka.server.truststore.jks
+      - source: broker3-keystore
+        target: /etc/kafka/secrets/kafka.server.keystore.jks
+    environment:
+      << : *broker-environment
+      KAFKA_BROKER_ID: 3
+      KAFKA_LISTENERS: INTERNAL_SSL://0.0.0.0:19094,SSL://0.0.0.0:9094
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL_SSL://kafka3:19094,SSL://{{.Node.Hostname}}:9094
+      
+      FILE_KEYSTORE_CREDENTIALS_LOCATION: /etc/kafka/secrets/kafka.server.keystore.credentials
+      FILE_KEYSTORE_CREDENTIALS_CONTENTS: ${BROKER3_KEYSTORE_PASSWORD:?}
+
+  ######################
+  ## Backend Services ##
+  ######################
+
+  schema-registry:
+    image: confluentinc/cp-schema-registry:5.5.1
+    deploy:
+      placement:
+        constraints:
+          - node.labels.type != data
+    networks:
+      - core
+    ports:
+      - "8081:8081"
+    secrets:
+      - source: client-truststore
+        target: /etc/kafka/secrets/kafka.client.truststore.jks
+      - source: schema-registry-keystore
+        target: /etc/kafka/secrets/schema-registry.keystore.jks
+    environment:
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: SSL://kafka1:19092,SSL://kafka2:19093,SSL://kafka3:19094
+      SCHEMA_REGISTRY_KAFKASTORE_SECURITY_PROTOCOL: SSL
+      SCHEMA_REGISTRY_KAFKASTORE_SSL_TRUSTSTORE_LOCATION: /etc/kafka/secrets/kafka.client.truststore.jks
+      SCHEMA_REGISTRY_KAFKASTORE_SSL_TRUSTSTORE_PASSWORD: ${TRUSTSTORE_PASSWORD:?}
+      SCHEMA_REGISTRY_KAFKASTORE_SSL_KEYSTORE_LOCATION: /etc/kafka/secrets/schema-registry.keystore.jks
+      SCHEMA_REGISTRY_KAFKASTORE_SSL_KEYSTORE_PASSWORD: ${SCHEMA_REGISTRY_KEYSTORE_PASSWORD:?}
+      SCHEMA_REGISTRY_KAFKASTORE_SSL_KEY_PASSWORD: ${SCHEMA_REGISTRY_KEYSTORE_PASSWORD:?}
+      SCHEMA_REGISTRY_KAFKASTORE_SSL_ENDPOINT_IDENTIFICATION_ALGORITHM: ""
+      SCHEMA_REGISTRY_KAFKASTORE_GROUP_ID: schema-registry
+      SCHEMA_REGISTRY_HOST_NAME: schema-registry
+      SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8081
+      SCHEMA_REGISTRY_ACCESS_CONTROL_ALLOW_ORIGIN: '*'
+      SCHEMA_REGISTRY_ACCESS_CONTROL_ALLOW_METHODS: GET,POST,PUT,OPTIONS
+
+      DT_CUSTOM_PROP: Environment=${ENVIRONMENT_NAME:?} Deployment=KafkaPlatform Tier=Backend Application=SchemaRegistry
+
+  rest-proxy:
+    image: confluentinc/cp-kafka-rest:5.5.1
+    deploy:
+      mode: global
+    networks:
+      - core
+    ports:
+      - "8082:8082"
+    secrets:
+      - source: client-truststore
+        target: /etc/kafka/secrets/kafka.client.truststore.jks
+      - source: rest-proxy-keystore
+        target: /etc/kafka/secrets/rest-proxy.keystore.jks
+    environment:
+      KAFKA_REST_BOOTSTRAP_SERVERS: SSL://kafka1:19092,SSL://kafka2:19093,SSL://kafka3:19094
+      KAFKA_REST_CLIENT_SECURITY_PROTOCOL: SSL
+      KAFKA_REST_CLIENT_SSL_TRUSTSTORE_LOCATION: /etc/kafka/secrets/kafka.client.truststore.jks
+      KAFKA_REST_CLIENT_SSL_TRUSTSTORE_PASSWORD: ${TRUSTSTORE_PASSWORD:?}
+      KAFKA_REST_CLIENT_SSL_KEYSTORE_LOCATION: /etc/kafka/secrets/rest-proxy.keystore.jks
+      KAFKA_REST_CLIENT_SSL_KEYSTORE_PASSWORD: ${REST_PROXY_KEYSTORE_PASSWORD:?}
+      KAFKA_REST_CLIENT_SSL_KEY_PASSWORD: ${REST_PROXY_KEYSTORE_PASSWORD:?}
+      KAFKA_REST_CLIENT_SSL_ENDPOINT_IDENTIFICATION_ALGORITHM: ""
+
+      KAFKA_REST_LISTENERS: http://0.0.0.0:8082/
+      KAFKA_REST_SCHEMA_REGISTRY_URL: http://schema-registry:8081/
+      KAFKA_REST_ZOOKEEPER_CONNECT: zoo1:2181,zoo2:2182,zoo3:2183
+      KAFKA_REST_HOST_NAME: rest-proxy
+      DT_CUSTOM_PROP: Environment=${ENVIRONMENT_NAME:?} Deployment=KafkaPlatform Tier=Backend Application=KafkaRestProxy
+
+  kafka-connect:
+    image: bkcimages.azurecr.io/appint-connect:${TAG_CONNECT:?image tag for connect must be provided}
+    deploy:
+      resources:
+        limits:
+          memory: 12G
+        reservations:
+          memory: 8G
+    networks:
+      - core
+    ports:
+      - "8083:8083"
+    command: /etc/confluent/docker/run
+    secrets:
+      - source: client-truststore
+        target: /etc/kafka/secrets/kafka.client.truststore.jks
+      - source: connect-keystore
+        target: /etc/kafka/secrets/connect.keystore.jks
+    environment:
+      CONNECT_BOOTSTRAP_SERVERS: kafka1:19092,kafka2:19093,kafka3:19094
+
+      CONNECT_SECURITY_PROTOCOL: SSL
+      CONNECT_SSL_ENDPOINT_IDENTIFICATION_ALGORITHM: ""
+      CONNECT_SSL_KEYSTORE_LOCATION: /etc/kafka/secrets/connect.keystore.jks
+      CONNECT_SSL_KEY_PASSWORD: ${CONNECT_KEYSTORE_PASSWORD:?}
+      CONNECT_SSL_KEYSTORE_PASSWORD: ${CONNECT_KEYSTORE_PASSWORD:?}
+      CONNECT_SSL_TRUSTSTORE_PASSWORD: ${TRUSTSTORE_PASSWORD:?}
+      CONNECT_SSL_TRUSTSTORE_LOCATION: /etc/kafka/secrets/kafka.client.truststore.jks
+
+      CONNECT_PRODUCER_SECURITY_PROTOCOL: SSL
+      CONNECT_PRODUCER_SSL_ENDPOINT_IDENTIFICATION_ALGORITHM: ""
+      CONNECT_PRODUCER_SSL_KEYSTORE_LOCATION: /etc/kafka/secrets/connect.keystore.jks
+      CONNECT_PRODUCER_SSL_KEY_PASSWORD: ${CONNECT_KEYSTORE_PASSWORD:?}
+      CONNECT_PRODUCER_SSL_KEYSTORE_PASSWORD: ${CONNECT_KEYSTORE_PASSWORD:?}
+      CONNECT_PRODUCER_SSL_TRUSTSTORE_PASSWORD: ${TRUSTSTORE_PASSWORD:?}
+      CONNECT_PRODUCER_SSL_TRUSTSTORE_LOCATION: /etc/kafka/secrets/kafka.client.truststore.jks
+      
+      CONNECT_CONSUMER_SECURITY_PROTOCOL: SSL
+      CONNECT_CONSUMER_SSL_ENDPOINT_IDENTIFICATION_ALGORITHM: ""
+      CONNECT_CONSUMER_SSL_KEYSTORE_LOCATION: /etc/kafka/secrets/connect.keystore.jks
+      CONNECT_CONSUMER_SSL_KEY_PASSWORD: ${CONNECT_KEYSTORE_PASSWORD:?}
+      CONNECT_CONSUMER_SSL_KEYSTORE_PASSWORD: ${CONNECT_KEYSTORE_PASSWORD:?}
+      CONNECT_CONSUMER_SSL_TRUSTSTORE_PASSWORD: ${TRUSTSTORE_PASSWORD:?}
+      CONNECT_CONSUMER_SSL_TRUSTSTORE_LOCATION: /etc/kafka/secrets/kafka.client.truststore.jks
+
+      CONNECT_REST_PORT: 8083
+
+      # setting rest.advertised.host.name to localhost will not work with
+      # multiple instances; but since HEALTHCHECK requires the name to exist
+      # before returning healthy, the DNS entry will never be added to the
+      # internal cluster network so it will never resolve, and the healthcheck
+      # will never report healthy
+      CONNECT_REST_ADVERTISED_HOST_NAME: "localhost"
+
+      CONNECT_GROUP_ID: connect-cluster1
+      CONNECT_CONFIG_STORAGE_TOPIC: connect-configs-connect-cluster1
+      CONNECT_OFFSET_STORAGE_TOPIC: connect-offsets-connect-cluster1
+      CONNECT_STATUS_STORAGE_TOPIC: connect-status-connect-cluster1
+      CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR: "3"
+      CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR: "3"
+      CONNECT_STATUS_STORAGE_REPLICATION_FACTOR: "3"
+      CONNECT_KEY_CONVERTER: org.apache.kafka.connect.storage.StringConverter
+      CONNECT_VALUE_CONVERTER: org.apache.kafka.connect.storage.StringConverter
+      CONNECT_INTERNAL_KEY_CONVERTER: "org.apache.kafka.connect.json.JsonConverter"
+      CONNECT_INTERNAL_VALUE_CONVERTER: "org.apache.kafka.connect.json.JsonConverter"
+      CONNECT_KEY_CONVERTER_SCHEMAS_ENABLE: "false"
+      CONNECT_VALUE_CONVERTER_SCHEMAS_ENABLE: "false"
+      CONNECT_INTERNAL_KEY_CONVERTER_SCHEMAS_ENABLE: "false"
+      CONNECT_INTERNAL_VALUE_CONVERTER_SCHEMAS_ENABLE: "false"
+      CONNECT_KEY_CONVERTER_SCHEMA_REGISTRY_URL: 'http://schema-registry:8081'
+      CONNECT_VALUE_CONVERTER_SCHEMA_REGISTRY_URL: 'http://schema-registry:8081'
+
+      CONNECT_LOG4J_ROOT_LOGLEVEL: "INFO"
+      CONNECT_LOG4J_LOGGERS: "org.apache.kafka.connect.runtime.rest=INFO,org.reflections=ERROR"
+      CONNECT_OFFSET_FLUSH_INTERVAL_MS: 10000
+
+      DT_CUSTOM_PROP: Environment=${ENVIRONMENT_NAME:?} Deployment=KafkaPlatform Tier=Backend Application=KafkaConnect
+
+  ######################
+  ##    Mirrormaker   ##
+  ######################
+
+  mirrormaker-phiaudit:
+    image: bkcimages.azurecr.io/appint-mirrormaker:${TAG_MIRRORMAKER:?image tag for mirrormaker must be provided}
+    deploy:
+      restart_policy:
+        condition: on-failure
+        delay: 30s
+        max_attempts: 3
+        window: 120s
+    networks:
+      - core
+    command: kafka-mirror-maker --consumer.config /etc/consumer.cfg --producer.config /etc/producer.cfg --whitelist "${MM_PHIAUDIT_WHITELIST}" --num.streams ${MM_NUM_STREAMS} --offset.commit.interval.ms 10000
+    secrets:
+      - source: client-truststore
+        target: /etc/kafka/secrets/kafka.client.truststore.jks
+      - source: mirrormaker-phiaudit-keystore
+        target: /etc/kafka/secrets/mirrormaker.keystore.jks
+    environment:
+      FILE_CONSUMER_LOCATION: /etc/consumer.cfg
+      FILE_CONSUMER_CONTENTS: |
+        bootstrap.servers=kafka1:19092,kafka2:19093,kafka3:19094
+        security.protocol=SSL
+        ssl.truststore.location=/etc/kafka/secrets/kafka.client.truststore.jks
+        ssl.truststore.password=${TRUSTSTORE_PASSWORD}
+        ssl.keystore.location=/etc/kafka/secrets/mirrormaker.keystore.jks
+        ssl.keystore.password=${MM_PHIAUDIT_KEYSTORE_PASSWORD}
+        ssl.key.password=${MM_PHIAUDIT_KEYSTORE_PASSWORD}
+        ssl.endpoint.identification.algorithm=
+        
+        request.timeout.ms=60000
+        max.poll.records=250
+        exclude.internal.topics=true
+        group.id=mirrormaker-phiaudit
+        auto.offset.reset=earliest
+        partition.assignment.strategy=org.apache.kafka.clients.consumer.RoundRobinAssignor
+      
+      FILE_PRODUCER_LOCATION: /etc/producer.cfg
+      FILE_PRODUCER_CONTENTS: |
+        bootstrap.servers=${MM_PHIAUDIT_PRODUCER_SERVERS}
+        client.id=mirror_maker_producer
+        sasl.mechanism=PLAIN
+        security.protocol=SASL_SSL
+        sasl.jaas.config=org.apache.kafka.common.security.plain.PlainLoginModule required username="$$ConnectionString" password="${MM_PHIAUDIT_PRODUCER_PASSWORD}";
+        acks=1
+        batch.size=2000
+        retries=2147483647
+
+      FILE_DEBUG_LOCATION: /etc/log4j.properties
+      FILE_DEBUG_CONTENTS: |
+        log4j.rootLogger=DEBUG, stderr
+        log4j.appender.stderr=org.apache.log4j.ConsoleAppender
+        log4j.appender.stderr.layout=org.apache.log4j.PatternLayout
+        log4j.appender.stderr.layout.ConversionPattern=[%d] %p %m (%c)%n
+        log4j.appender.stderr.Target=System.err
+
+      # Turn on mirrormaker debug logging by uncommenting this and deploying, or adding this variable
+      # KAFKA_OPTS: "-Dlog4j.configuration=file:/etc/log4j.properties"
+
+      DT_CUSTOM_PROP: Environment=${ENVIRONMENT_NAME:?} Deployment=KafkaPlatform Tier=Backend Application=Mirrormaker PHIAudit
+
+  mirrormaker-datapub:
+    image: bkcimages.azurecr.io/appint-mirrormaker:${TAG_MIRRORMAKER:?image tag for mirrormaker must be provided}
+    deploy:
+      restart_policy:
+        condition: on-failure
+        delay: 30s
+        max_attempts: 3
+        window: 120s
+    networks:
+      - core
+    command: kafka-mirror-maker --consumer.config /etc/consumer.cfg --producer.config /etc/producer.cfg --whitelist "${MM_DATAPUB_WHITELIST}" --num.streams ${MM_NUM_STREAMS} --offset.commit.interval.ms 10000
+    secrets:
+      - source: client-truststore
+        target: /etc/kafka/secrets/kafka.client.truststore.jks
+      - source: mirrormaker-datapub-keystore
+        target: /etc/kafka/secrets/mirrormaker.keystore.jks
+    environment:
+      FILE_CONSUMER_LOCATION: /etc/consumer.cfg
+      FILE_CONSUMER_CONTENTS: |
+        bootstrap.servers=kafka1:19092,kafka2:19093,kafka3:19094
+        security.protocol=SSL
+        ssl.truststore.location=/etc/kafka/secrets/kafka.client.truststore.jks
+        ssl.truststore.password=${TRUSTSTORE_PASSWORD}
+        ssl.keystore.location=/etc/kafka/secrets/mirrormaker.keystore.jks
+        ssl.keystore.password=${MM_DATAPUB_KEYSTORE_PASSWORD}
+        ssl.key.password=${MM_DATAPUB_KEYSTORE_PASSWORD}
+        ssl.endpoint.identification.algorithm=
+        
+        exclude.internal.topics=true
+        group.id=mirrormaker-datapub
+        auto.offset.reset=earliest
+        partition.assignment.strategy=org.apache.kafka.clients.consumer.RoundRobinAssignor
+      
+      FILE_PRODUCER_LOCATION: /etc/producer.cfg
+      FILE_PRODUCER_CONTENTS: |
+        bootstrap.servers=${MM_DATAPUB_PRODUCER_SERVERS}
+        client.id=mirror_maker_producer
+        sasl.mechanism=PLAIN
+        security.protocol=SASL_SSL
+        sasl.jaas.config=org.apache.kafka.common.security.plain.PlainLoginModule required username="$$ConnectionString" password="${MM_DATAPUB_PRODUCER_PASSWORD}";
+        acks=1
+        batch.size=2000
+        retries=2147483647
+
+      FILE_DEBUG_LOCATION: /etc/log4j.properties
+      FILE_DEBUG_CONTENTS: |
+        log4j.rootLogger=DEBUG, stderr
+        log4j.appender.stderr=org.apache.log4j.ConsoleAppender
+        log4j.appender.stderr.layout=org.apache.log4j.PatternLayout
+        log4j.appender.stderr.layout.ConversionPattern=[%d] %p %m (%c)%n
+        log4j.appender.stderr.Target=System.err
+
+      # Turn on mirrormaker debug logging by uncommenting this and deploying, or adding this variable
+      # KAFKA_OPTS: "-Dlog4j.configuration=file:/etc/log4j.properties"
+
+      DT_CUSTOM_PROP: Environment=${ENVIRONMENT_NAME:?} Deployment=KafkaPlatform Tier=Backend Application=Mirrormaker DataPub
+
+  #######################
+  ##     Heartbeat     ##
+  #######################
+
+  heartbeat:
+    image: bkcimages.azurecr.io/appint-heartbeat:${TAG_HEARTBEAT:?image tag for heartbeat must be provided}
+    networks:
+      - core
+    command: dotnet Kafka-test.dll --bootstrap-servers kafka1:19092,kafka2:19093,kafka3:19094 --topic heartbeat --ca-cert /etc/ca.crt --key-store /etc/heartbeat.keystore.p12 --key-store-password "${HEARTBEAT_KEYSTORE_PASSWORD:?}"
+    secrets:
+      - source: ca-certificate
+        target: /etc/ca.crt
+      - source: heartbeat-keystore
+        target: /etc/heartbeat.keystore.p12
+
+  #######################
+  ## Frontend Services ##
+  #######################
+
+  connect-ui:
+    image: landoop/kafka-connect-ui:0.9.7
+    deploy:
+      placement:
+        constraints:
+          - node.labels.type != data
+    networks:
+      - core
+    ports:
+      - "8000:8000"
+    environment:
+      CONNECT_URL: "http://kafka-connect:8083/"
+      PROXY: "true"
+      DT_CUSTOM_PROP: Environment=${ENVIRONMENT_NAME:?} Deployment=KafkaPlatform Tier=Frontend Application=KafkaConnectUI
+
+  manager:
+    image: kafkamanager/kafka-manager:3.0.0.4
+    deploy:
+      placement:
+        constraints:
+          - node.labels.type != data
+    networks:
+      - core
+    ports:
+      - "8001:9000"
+    environment:
+      ZK_HOSTS: zoo1:2181,zoo2:2182,zoo3:2183
+      APPLICATION_SECRET: letmein
+      KM_ARGS: -Djava.net.preferIPv4Stack=true
+      DT_CUSTOM_PROP: Environment=${ENVIRONMENT_NAME:?} Deployment=KafkaPlatform Tier=Frontend Application=KafkaManagerUI
+
+  topics-ui:
+    image: landoop/kafka-topics-ui:0.9.4
+    deploy:
+      placement:
+        constraints:
+          - node.labels.type != data
+    networks:
+      - core
+    ports:
+      - "8002:8000"
+    environment:
+      KAFKA_REST_PROXY_URL: "http://rest-proxy:8082/"
+      PROXY: "true"
+      DT_CUSTOM_PROP: Environment=${ENVIRONMENT_NAME:?} Deployment=KafkaPlatform Tier=Frontend Application=KafkaTopicsUI
+
+  zoo-ui:
+    image: elkozmon/zoonavigator:1.0.1
+    deploy:
+      placement:
+        constraints:
+          - node.labels.type != data
+    networks:
+      - core
+    ports:
+      - "8003:9000"
+    environment:
+      AUTO_CONNECT_CONNECTION_ID: ENV
+      CONNECTION_ENV_NAME: ${ENVIRONMENT_NAME:?}
+      CONNECTION_ENV_CONN: zoo1:2181,zoo2:2182,zoo3:2183
+      DT_CUSTOM_PROP: Environment=${ENVIRONMENT_NAME:?} Deployment=KafkaPlatform Tier=Frontend Application=ZooNavigatorUI
+
+  registry-ui:
+    image: landoop/schema-registry-ui:0.9.5
+    deploy:
+      placement:
+        constraints:
+          - node.labels.type != data
+    networks:
+      - core
+    ports:
+      - "8004:8000"
+    environment:
+      SCHEMAREGISTRY_URL: http://schema-registry:8081
+      DT_CUSTOM_PROP: Environment=${ENVIRONMENT_NAME:?} Deployment=KafkaPlatform Tier=Frontend Application=SchemaRegistryUI
+
+  magic-ui:
+    image: digitsy/kafka-magic:2.0.3.4
+    networks:
+      - core
+    ports:
+      - "8005:80"
+    environment:
+      KMAGIC_ALLOW_TOPIC_DELETE: "true"
+      DT_CUSTOM_PROP: Environment=${ENVIRONMENT_NAME:?} Deployment=KafkaPlatform Tier=Frontend Application=KafkaMagicUI
+
+
+#################################
+## Networks, Volumes & Secrets ##
+#################################
+
+secrets:
+  # truststores
+  client-truststore:
+    file: /home/s-docker/certs/kafka.client.truststore.jks
+  broker-truststore:
+    file: /home/s-docker/certs/kafka.broker.truststore.jks
+  ca-certificate:
+    file: /home/s-docker/certs/ca.crt
+
+  # broker keystores
+  broker1-keystore:
+    file: /home/s-docker/certs/broker1.keystore.jks
+  broker2-keystore:
+    file: /home/s-docker/certs/broker2.keystore.jks
+  broker3-keystore:
+    file: /home/s-docker/certs/broker3.keystore.jks
+
+  # internal service keystores
+  heartbeat-keystore:
+    file: /home/s-docker/certs/heartbeat.keystore.p12
+  connect-keystore:
+    file: /home/s-docker/certs/connect.keystore.jks
+  schema-registry-keystore:
+    file: /home/s-docker/certs/schema-registry.keystore.jks
+  mirrormaker-phiaudit-keystore:
+    file: /home/s-docker/certs/mirrormaker-phiaudit.keystore.jks
+  mirrormaker-datapub-keystore:
+    file: /home/s-docker/certs/mirrormaker-datapub.keystore.jks
+  rest-proxy-keystore:
+    file: /home/s-docker/certs/rest-proxy.keystore.jks
+
+networks:
+  core:
+    driver: overlay
+    attachable: true
+
+volumes:
+  zoo1_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /kafka/zk-data
+
+  zoo1_logs:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /kafka/zk-txn-logs
+
+  zoo2_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /kafka/zk-data
+
+  zoo2_logs:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /kafka/zk-txn-logs
+
+  zoo3_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /kafka/zk-data
+
+  zoo3_logs:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /kafka/zk-txn-logs
+
+  kafka1_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /kafka/data
+
+  kafka2_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /kafka/data
+
+  kafka3_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /kafka/data
